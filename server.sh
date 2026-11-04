@@ -9,6 +9,9 @@
 LISTEN_PORT=1234
 SCRIPT=$(readlink -f "$0")
 
+# Unit page that the "assignment" request downloads
+UNIT_URL="https://www.sydney.edu.au/units/INFO1112/2026-S2C-ND-CC"
+
 # Find this container's IP from ifconfig (no hardcoding)
 get_ip() {
     ifconfig | grep -oE 'inet (addr:)?[0-9.]+' | grep -oE '[0-9.]+$' | grep -v '^127\.' | head -n 1
@@ -18,6 +21,36 @@ get_ip() {
 # Column 4 is "address:port", so keep whatever follows the last colon.
 get_port() {
     ss -ltnp 2>/dev/null | awk '/ncat/ {n=split($4,a,":"); print a[n]; exit}'
+}
+
+# Handle the "assignment" request: curl the unit page, convert the HTML to
+# text with html2text, and display it in the server terminal (stderr).
+# Anything printed to stdout goes back to the client.
+handle_assignment() {
+    local html text
+    html=$(mktemp) || { echo "Error: could not create temp file."; return 1; }
+    text=$(mktemp) || { rm -f "$html"; echo "Error: could not create temp file."; return 1; }
+
+    if ! curl -sS -f -L -A 'Mozilla/5.0' --max-time 20 "$UNIT_URL" -o "$html" 2>&1 >/dev/null; then
+        echo "Error: could not download the unit page from $UNIT_URL"
+        echo "Error: could not download the unit page." >&2
+        rm -f "$html" "$text"
+        return 1
+    fi
+
+    if ! html2text "$html" > "$text" 2>/dev/null || [ ! -s "$text" ]; then
+        echo "Error: could not convert the downloaded page to text."
+        echo "Error: html2text conversion failed or produced no output." >&2
+        rm -f "$html" "$text"
+        return 1
+    fi
+
+    echo "----- Assignment information (from $UNIT_URL) -----" >&2
+    cat "$text" >&2
+    echo "----- End of assignment information -----" >&2
+
+    echo "assignment page downloaded and converted (see server terminal)"
+    rm -f "$html" "$text"
 }
 
 # Runs once per client connection. stdin/stdout are the client's socket:
@@ -33,7 +66,7 @@ handle_request() {
 
     case "$request" in
         assignment|asssignment)
-            echo "assignment request received (not implemented yet)"
+            handle_assignment
             ;;
         population)
             echo "population request received (not implemented yet)"
