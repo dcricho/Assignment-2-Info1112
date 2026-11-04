@@ -14,6 +14,11 @@ SCRIPT=$(readlink -f "$0")
 UNIT_URL="https://www.sydney.edu.au/units/INFO1112/2026-S2C-ND-CC"
 ASSIGNMENT_NAME="Assignment 2"
 
+# ABS population data (NSW) and the measure to read from it
+# (ERP_P_20 = estimated resident population, total persons).
+CSV_URL="https://dbr.abs.gov.au/processedData/csv/STE_1.csv"
+POP_MEASURE="ERP_P_20"
+
 # Where assignment.json is written (next to this script)
 JSON_FILE="$(dirname "$SCRIPT")/assignment.json"
 
@@ -103,6 +108,55 @@ handle_assignment() {
     rm -f "$html" "$text" "$wide"
 }
 
+# Handle the "population" request:
+#  1. download STE_1.csv with curl
+#  2. read the year headers and the total-population row, building
+#     "year,population" pairs (empty cells are skipped)
+#  3. display the latest year's NSW population (server terminal and client)
+handle_population() {
+    local csv pairs latest year pop
+
+    csv=$(mktemp) || { echo "Error: could not create temp file."; return 1; }
+    pairs=$(mktemp) || { rm -f "$csv"; echo "Error: could not create temp file."; return 1; }
+
+    if ! curl -sS -f -L --max-time 20 "$CSV_URL" -o "$csv" 2>/dev/null || [ ! -s "$csv" ]; then
+        echo "Error: could not download the population data from $CSV_URL"
+        echo "Error: could not download the population data." >&2
+        rm -f "$csv" "$pairs"
+        return 1
+    fi
+
+    # Row 1 holds the years (from column 4 on); the measure row holds the values
+    tr -d '"\r' < "$csv" | awk -F, -v code="$POP_MEASURE" '
+        NR == 1 { for (i = 4; i <= NF; i++) year[i] = $i; next }
+        $1 == code {
+            for (i = 4; i <= NF; i++) if ($i != "") print year[i] "," $i
+            exit
+        }' > "$pairs"
+
+    if [ ! -s "$pairs" ]; then
+        echo "Error: no population data found for measure '$POP_MEASURE' in the CSV."
+        echo "Error: no population data found for measure '$POP_MEASURE'." >&2
+        rm -f "$csv" "$pairs"
+        return 1
+    fi
+
+    latest=$(tail -n 1 "$pairs")
+    year=${latest%%,*}
+    pop=${latest##*,}
+
+    if ! [[ "$year" =~ ^[0-9]{4}$ ]] || ! [[ "$pop" =~ ^[0-9]+$ ]]; then
+        echo "Error: could not read the latest population figure (got '$latest')."
+        echo "Error: could not read the latest population figure (got '$latest')." >&2
+        rm -f "$csv" "$pairs"
+        return 1
+    fi
+
+    echo "Latest NSW population ($year): $pop" >&2
+    echo "Latest NSW population ($year): $pop"
+    rm -f "$csv" "$pairs"
+}
+
 # Runs once per client connection. stdin/stdout are the client's socket:
 # the reply goes to stdout (back to the client), logs go to stderr (terminal).
 handle_request() {
@@ -118,7 +172,7 @@ handle_request() {
             handle_assignment
             ;;
         population)
-            echo "population request received (not implemented yet)"
+            handle_population
             ;;
         *)
             echo "Error: unknown request '$request'. Valid requests: assignment, population"
