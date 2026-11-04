@@ -30,12 +30,12 @@ get_port() {
 
 # Handle the "assignment" request:
 #  1. curl the unit page and convert it to text with html2text
-#  2. display the text in the server terminal (stderr)
+#  2. display the assignment's rows in the server terminal (stderr)
 #  3. extract title, topic, due date and points from the page text
 #  4. write assignment.json and send it back to the client (stdout)
 # Anything printed to stdout goes back to the client.
 handle_assignment() {
-    local html text wide line_no title detail topic points due_raw due_date
+    local html text wide line_no title detail topic points due_raw due_date show_no
 
     html=$(mktemp) || { echo "Error: could not create temp file."; return 1; }
     text=$(mktemp) || { rm -f "$html"; echo "Error: could not create temp file."; return 1; }
@@ -57,9 +57,12 @@ handle_assignment() {
         return 1
     fi
 
-    echo "----- Assignment information (from $UNIT_URL) -----" >&2
-    cat "$text" >&2
-    echo "----- End of assignment information -----" >&2
+    # Display only this assignment's rows (as in Figure 7): the line that
+    # contains the assignment name plus the two lines after it.
+    show_no=$(grep -n -m1 "$ASSIGNMENT_NAME" "$text" | cut -d: -f1)
+    if [ -n "$show_no" ]; then
+        sed -n "${show_no},$((show_no + 2))p" "$text" >&2
+    fi
 
     # Find the row for this assignment; its other columns are on the next line
     line_no=$(grep -n -m1 "$ASSIGNMENT_NAME" "$wide" | cut -d: -f1)
@@ -103,12 +106,11 @@ handle_assignment() {
 # Runs once per client connection. stdin/stdout are the client's socket:
 # the reply goes to stdout (back to the client), logs go to stderr (terminal).
 handle_request() {
-    local request client_ip
+    local request
     read -r request
     request=$(printf '%s' "$request" | tr -d '\r')
 
-    client_ip=${NCAT_REMOTE_ADDR:-unknown}
-    echo "Request from client IP: $client_ip" >&2
+    echo "Connection received on ${NCAT_REMOTE_ADDR:-unknown} ${NCAT_REMOTE_PORT:-unknown}" >&2
     echo "Received request: $request" >&2
 
     case "$request" in
