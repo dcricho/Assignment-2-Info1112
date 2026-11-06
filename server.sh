@@ -11,9 +11,10 @@ CSV_URL="https://dbr.abs.gov.au/processedData/csv/STE_1.csv"
 POP_MEASURE="ERP_P_20"
 # POIs within this many km of the query count as "neighbouring".
 POI_RADIUS_KM=2
-# dirname strips the filename, so the JSON files are saved next to the script.
+# dirname strips the filename, so the output files are saved next to the script.
 JSON_FILE="$(dirname "$SCRIPT")/assignment.json"
 POI_FILE="$(dirname "$SCRIPT")/poi.json"
+POP_PNG="$(dirname "$SCRIPT")/population.png"
 
 # Finds the container's IP from ifconfig instead of hardcoding it.
 get_ip() {
@@ -48,6 +49,98 @@ Taronga Zoo|-33.8433|151.2410
 Bondi Beach|-33.8908|151.2743
 Manly Beach|-33.7969|151.2880
 EOF
+}
+
+# The line-plot script. It is written to a temp file and run with python3 by make_plot.
+# The quoted 'EOF' stops bash expanding anything inside the Python code.
+plot_script() {
+    cat <<'EOF'
+# AI ACKNOWLEDGMENT: this plotting code was created with the help of an AI assistant (Claude)
+# for INFO1112 Assignment 2, as the brief allows. The year,population data is read from the CSV by Bash
+# (see handle_population in server.sh); this script only draws the line plot from that data.
+import sys
+import matplotlib
+matplotlib.use("Agg")  # draw to a file, no display needed
+import matplotlib.pyplot as plt
+
+pairs_file, out_file = sys.argv[1], sys.argv[2]
+years, pops = [], []
+for line in open(pairs_file):
+    line = line.strip()
+    if line:
+        year, pop = line.split(",")
+        years.append(int(year))
+        pops.append(int(pop))
+
+plt.figure(figsize=(8, 5))
+plt.plot(years, pops, marker="o")
+plt.xticks(years)
+plt.ticklabel_format(style="plain", axis="y")
+plt.xlabel("Year")
+plt.ylabel("Population")
+plt.title("NSW estimated resident population")
+plt.grid(True)
+plt.tight_layout()
+plt.savefig(out_file, dpi=100)
+EOF
+}
+
+# Downloads the CSV and turns its year columns into "year,population" pairs. Usage: fetch_pairs <pairs_file>
+# On failure it prints an error to the client (stdout) and the server (stderr) and returns 1.
+fetch_pairs() {
+    local pairs="$1" csv
+
+    csv=$(mktemp) || { echo "Error: could not create temp file."; return 1; }
+
+    # curl flags: -s silent, -S show errors, -f fail on HTTP errors, -L follow redirects, --max-time stops hanging.
+    if ! curl -sS -f -L --max-time 20 "$CSV_URL" -o "$csv" 2>/dev/null || [ ! -s "$csv" ]; then
+        echo "Error: could not download the population data from $CSV_URL"
+        echo "Error: could not download the population data." >&2
+        rm -f "$csv"
+        return 1
+    fi
+
+    # tr -d strips quote marks and Windows line endings. awk -F, splits on commas, -v passes in the measure code.
+    # Line 1 stores each year header (columns 4 onward); the ERP_P_20 row prints "year,value" for each non-empty cell.
+    tr -d '"\r' < "$csv" | awk -F, -v code="$POP_MEASURE" '
+        NR == 1 { for (i = 4; i <= NF; i++) year[i] = $i; next }
+        $1 == code {
+            for (i = 4; i <= NF; i++) if ($i != "") print year[i] "," $i
+            exit
+        }' > "$pairs"
+    rm -f "$csv"
+
+    # No pairs means the measure row was not found in the CSV.
+    if [ ! -s "$pairs" ]; then
+        echo "Error: no population data found for measure '$POP_MEASURE' in the CSV."
+        echo "Error: no population data found for measure '$POP_MEASURE'." >&2
+        return 1
+    fi
+}
+
+# Draws the plot from a pairs file into POP_PNG using the embedded Python. Usage: make_plot <pairs_file>
+make_plot() {
+    local pairs="$1" py
+
+    # The plot needs python3 and matplotlib in the container.
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "Error: python3 not found. Install it with: apk add python3 py3-matplotlib"
+        echo "Error: python3 not found." >&2
+        return 1
+    fi
+
+    py=$(mktemp) || { echo "Error: could not create temp file."; return 1; }
+    plot_script > "$py"
+    rm -f "$POP_PNG"
+
+    # The plot is only a success if python exits cleanly AND the PNG file exists and is not empty.
+    if ! python3 "$py" "$pairs" "$POP_PNG" 2>/dev/null || [ ! -s "$POP_PNG" ]; then
+        echo "Error: could not generate the population plot (is py3-matplotlib installed?)."
+        echo "Error: plot generation failed." >&2
+        rm -f "$py" "$POP_PNG"
+        return 1
+    fi
+    rm -f "$py"
 }
 
 # Handles "assignment": downloads the unit page, shows the Assignment 2 rows, then builds and sends assignment.json.
@@ -133,35 +226,15 @@ handle_assignment() {
     rm -f "$html" "$text" "$wide"
 }
 
-# Handles "population": downloads the CSV, turns its year columns into year,population pairs, and reports the latest.
+# Handles "population": gets the year,population pairs, reports the latest, and builds population.png on the server.
 handle_population() {
-    local csv pairs latest year pop
+    local pairs latest year pop
 
-    csv=$(mktemp) || { echo "Error: could not create temp file."; return 1; }
-    pairs=$(mktemp) || { rm -f "$csv"; echo "Error: could not create temp file."; return 1; }
+    pairs=$(mktemp) || { echo "Error: could not create temp file."; return 1; }
 
-    # Same curl flags as above, without the user agent.
-    if ! curl -sS -f -L --max-time 20 "$CSV_URL" -o "$csv" 2>/dev/null || [ ! -s "$csv" ]; then
-        echo "Error: could not download the population data from $CSV_URL"
-        echo "Error: could not download the population data." >&2
-        rm -f "$csv" "$pairs"
-        return 1
-    fi
-
-    # tr -d strips quote marks and Windows line endings. awk -F, splits on commas, -v passes in the measure code.
-    # Line 1 stores each year header (columns 4 onward); the ERP_P_20 row prints "year,value" for each non-empty cell.
-    tr -d '"\r' < "$csv" | awk -F, -v code="$POP_MEASURE" '
-        NR == 1 { for (i = 4; i <= NF; i++) year[i] = $i; next }
-        $1 == code {
-            for (i = 4; i <= NF; i++) if ($i != "") print year[i] "," $i
-            exit
-        }' > "$pairs"
-
-    # No pairs means the measure row was not found in the CSV.
-    if [ ! -s "$pairs" ]; then
-        echo "Error: no population data found for measure '$POP_MEASURE' in the CSV."
-        echo "Error: no population data found for measure '$POP_MEASURE'." >&2
-        rm -f "$csv" "$pairs"
+    # Download and parse the CSV; fetch_pairs prints its own errors.
+    if ! fetch_pairs "$pairs"; then
+        rm -f "$pairs"
         return 1
     fi
 
@@ -174,14 +247,37 @@ handle_population() {
     if ! [[ "$year" =~ ^[0-9]{4}$ ]] || ! [[ "$pop" =~ ^[0-9]+$ ]]; then
         echo "Error: could not read the latest population figure (got '$latest')."
         echo "Error: could not read the latest population figure (got '$latest')." >&2
-        rm -f "$csv" "$pairs"
+        rm -f "$pairs"
         return 1
     fi
 
     # Shows the result on the server terminal, then sends it to the client.
     echo "Latest NSW population ($year): $pop" >&2
     echo "Latest NSW population ($year): $pop"
-    rm -f "$csv" "$pairs"
+
+    # Builds the plot; if it fails, make_plot has already printed the error.
+    if make_plot "$pairs"; then
+        echo "Plot saved on the server as $POP_PNG" >&2
+        echo "Plot generated. Send the request 'population.png' to receive the image."
+    fi
+    rm -f "$pairs"
+}
+
+# Handles "population.png": rebuilds the plot and sends the raw PNG bytes to the client (save with: nc ... > population.png).
+handle_population_png() {
+    local pairs
+
+    pairs=$(mktemp) || { echo "Error: could not create temp file."; return 1; }
+
+    if ! fetch_pairs "$pairs" || ! make_plot "$pairs"; then
+        rm -f "$pairs"
+        return 1
+    fi
+
+    echo "Sending $POP_PNG to the client" >&2
+    # stdout goes to the client, so cat sends the image bytes.
+    cat "$POP_PNG"
+    rm -f "$pairs"
 }
 
 # Handles "poi <name>" or "poi <lat>,<lon>": returns a JSON list of POIs within POI_RADIUS_KM.
@@ -279,13 +375,17 @@ handle_request() {
         population)
             handle_population
             ;;
+        # The plot image itself, sent as raw bytes.
+        population.png)
+            handle_population_png
+            ;;
         # "poi <name or lat,lon>": ${request#* } strips everything up to the first space, leaving the argument.
         poi\ *|POI\ *)
             handle_poi "${request#* }"
             ;;
         # Default branch: any other request gets an error listing the valid ones.
         *)
-            echo "Error: unknown request '$request'. Valid requests: assignment, population, poi <name or lat,lon>"
+            echo "Error: unknown request '$request'. Valid requests: assignment, population, population.png, poi <name or lat,lon>"
             ;;
     esac
 }
