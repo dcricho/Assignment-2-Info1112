@@ -247,7 +247,7 @@ handle_poi() {
     rm -f "$data"
 }
 
-# Runs once per client connection: reads the request, logs who connected, and calls the matching handler.
+# Runs once per client connection: reads the request, logs who connected, rejects a repeat request from a busy IP, and calls the matching handler.
 handle_request() {
     local request
     # read -r reads one line from the client's socket; -r stops backslashes being treated as escapes.
@@ -258,6 +258,18 @@ handle_request() {
     # NCAT_REMOTE_ADDR and NCAT_REMOTE_PORT are set by ncat for each connection; :-unknown is a fallback.
     echo "Connection received on ${NCAT_REMOTE_ADDR:-unknown} ${NCAT_REMOTE_PORT:-unknown}" >&2
     echo "Received request: $request" >&2
+
+    # One lock directory per client IP. mkdir is atomic and fails if the directory already exists,
+    # which means this IP already has a request being handled, so the new one is rejected.
+    # LOCK_DIR is deliberately not local, so the exit trap below can still see it.
+    LOCK_DIR="/tmp/server_busy_${NCAT_REMOTE_ADDR:-unknown}"
+    if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+        echo "Error: a request from ${NCAT_REMOTE_ADDR:-unknown} is already being handled. Request rejected."
+        echo "Rejected request from ${NCAT_REMOTE_ADDR:-unknown}: previous request still in progress." >&2
+        return 1
+    fi
+    # Removes the lock when this handler process exits, however it exits.
+    trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT
 
     # case routes the request; "asssignment" (three s's) is accepted because the brief's example spells it that way.
     case "$request" in
@@ -289,6 +301,9 @@ if ! command -v ncat >/dev/null 2>&1; then
     echo "Error: ncat not found. Install it with: apk add nmap-ncat" >&2
     exit 1
 fi
+
+# Clears any lock directories left over from a previous run, so a crash cannot block clients.
+rm -rf /tmp/server_busy_* 2>/dev/null
 
 SERVER_IP=$(get_ip)
 
