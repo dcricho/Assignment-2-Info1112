@@ -1,3 +1,5 @@
+2d70f30 2026-11-06 Add received population.png
+c91c285 2026-11-06 Add gitCommit.log
 c37a6fb 2026-11-06 Update README with requests, tests, assumptions and AI acknowledgment
 783dbe8 2026-11-06 Add population.png: plot with Python and send it to the client
 292ccec 2026-11-06 Reject second request from same IP while busy (test case b)
