@@ -211,7 +211,7 @@ if [ -z "$SERVER_IP" ] || [ -z "$SERVER_PORT" ]; then
     exit 1
 fi
 
-echo "Server is running at $SERVER_IP:$SERVER_PORT. Waiting for requests..."
+echo "The server is running at $SERVER_IP, port=$SERVER_PORT"
 
 # Keep running until stopped
 wait "$NCAT_PID"
